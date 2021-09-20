@@ -1,37 +1,81 @@
 package main
 
 import (
-	// "crypto/tls"
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"os"
 	"strings"
 )
 
-var hostname string
-var port string
-
 func main() {
-	readArgs()
-	connectionString := "ftp.3700.network:21"
-	connection, err := makeConn(connectionString)
+	server, username, password, command, locations := readArgs()
+	hostname, port, filePath := strings.Split(server, ":")[0], strings.Split(strings.Split(server, ":")[1], "/")[0], server[strings.Index(server, "/"):]
+	fmt.Println(filePath, command, locations)
+	connection, err := makeConn(hostname + ":" + port)
 	checkError(err)
-	defer connection.Close()
-	// writeToServer(connection, "AUTH TLS\r\n")
-	response, readError := readFromServer(connection)
-	checkError(readError)
+	response := readFromServer(connection)
 	fmt.Println(response)
-	// connection = tls.Client(connection, &tls.Config{ServerName: "ftp.3700.network"})
-	// writeToServer(connection, "USER susmand\r\n")
-	// response, readError = readFromServer(connection)
-	// checkError(readError)
-	// fmt.Println(response)
-	// writeToServer(connection, "PASS 7SayEbTMvZkfVuQBeXCd\r\n")
+	defer connection.Close()
+	startUp(connection, hostname, username, password)
+	handleCommand(connection, command, locations, filePath)
+}
+
+func handleCommand(connection net.Conn, command string, locations []string, remoteFilePath string) {
+	fmt.Println(ftpCommand(command, locations, remoteFilePath))
+	writeToServer(connection, ftpCommand(command, locations, remoteFilePath))
+	response := readFromServer(connection)
+	fmt.Println(response)
+}
+
+func ftpCommand(command string, locations []string, remoteFilePath string) string {
+	switch command {
+	case "ls":
+		return fmt.Sprintf("LIST %s\r\n", remoteFilePath)
+	case "rm":
+		return fmt.Sprintf("DELE %s\r\n", remoteFilePath)
+	case "rmdir":
+		return fmt.Sprintf("RMD %s\r\n", remoteFilePath)
+	case "mkdir":
+		return fmt.Sprintf("MKD %s\r\n", remoteFilePath)
+	// case "cp": return fmt.Sprintf("")
+	// case "mv":
+	default:
+		panic("Invalid command!")
+	}
+}
+
+func startUp(conn net.Conn, hostname string, username string, password string) {
+	writeToServer(conn, "AUTH TLS\r\n")
+	response := readFromServer(conn)
+	fmt.Println(response)
+	conn = tls.Client(conn, &tls.Config{ServerName: hostname})
+	writeToServer(conn, fmt.Sprintf("USER %s\r\n", username))
+	response = readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, fmt.Sprintf("PASS %s\r\n", password))
+	response = readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, "PBSZ 0\r\n")
+	response = readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, "PROT P\r\n")
+	response = readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, "TYPE I\r\n")
+	response = readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, "MODE S\r\n")
+	response = readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, "STRU F\r\n")
+	response = readFromServer(conn)
+	fmt.Println(response)
 }
 
 // Read the response from the given server connection.
-func readFromServer(connection net.Conn) (string, error) {
+func readFromServer(connection net.Conn) string {
 
 	// initialize a new Reader so ReadString() method can be used
 	reader := bufio.NewReader(connection)
@@ -46,75 +90,80 @@ func readFromServer(connection net.Conn) (string, error) {
 	// chop off the newline at the end of line (from the docs:
 	// "returning a string containing the data up to and including the delimiter)"
 	readLine := line[:len(line)-1]
-	return readLine, nil
+	return readLine
 }
 
-func readArgs() string {
-	if len(os.Args) < 3 {
-		panic("Please input a valid operation followed by one or two locations.")
+func readArgs() (string, string, string, string, []string) {
+	if len(os.Args) < 3 || !validCommand(os.Args[1], os.Args[2:]) {
+		panic("Please input a valid FTP operation followed by one or two locations.")
 	}
-	operation, param1 := os.Args[1], os.Args[2]
-	var param2 string
-
-	if len(os.Args) == 4 {
-		param2 = os.Args[3]
+	var remoteURL string
+	if isRemote(os.Args[2]) {
+		remoteURL = os.Args[2]
+	} else {
+		remoteURL = os.Args[3]
 	}
+	command, locations := os.Args[1], os.Args[2:]
+	server, username, password := parseRemote(remoteURL)
 
-	var valid bool = validAddresses(param1, param2)
-	var username string
-	var password string
-	if (valid) {
-		interpretParam(param1)
-		interpretParam(param2)
-	}
-
-	return operation
+	return server, username, password, command, locations
 }
 
-func interpretParam(param string) (string, string) {
-	var username string
-	var password string
+func parseRemote(remoteURL string) (string, string, string) {
+	userSeparate := strings.Split(remoteURL[7:], "@")
+	user, url := userSeparate[0], userSeparate[1]
+	username, password := strings.Split(user, ":")[0], strings.Split(user, ":")[1]
+	return url, username, password
+}
 
-	if isRemote(param) {
-		if !isValidURL(param) {
-			panic("Invalid Remote file format!")
-		}
-		userSeparate := strings.Split(param[7:], "@")
-		user, url := userSeparate[0], userSeparate[1]
-		if strings.Contains(url, ":") {
-			port = strings.Split(url, ":")[1]
-		}
-		hostname = strings.Split(url, ":")[0]
-
-		if len(strings.Split(user, ":")) == 2 {
-			username, password = strings.Split(user, ":")[0], strings.Split(user, ":")[1]
-		} else {
-			username, password = "anonymous", ""
-		}
-		return username, password
+func validCommand(command string, params []string) bool {
+	if command == "ls" || command == "rm" || command == "rmdir" || command == "mkdir" {
+		return len(params) == 1 && validRemoteLocation(params[0])
+	} else if command == "cp" || command == "mv" {
+		return len(params) == 2 && validAddresses(params[0], params[1])
+	} else {
+		return false
 	}
-	interpretLocalParam
+}
 
+func validRemoteLocation(location string) bool {
+	if !strings.HasPrefix(location, "ftps://") {
+		panic("Please input a valid URL beginning with ftps://")
+	}
+
+	userSeparate := strings.Split(location[7:], "@")
+
+	if len(userSeparate) != 2 {
+		panic("Please supply URL in format ftps://<username>:<password>@<location.com>/<path-to-file>!")
+	}
+
+	user, url := userSeparate[0], userSeparate[1]
+
+	if len(strings.Split(user, ":")) != 2 {
+		panic("Please include your login username and password in your FTP URL.")
+	}
+
+	urlPieces := strings.Split(url, ".")
+
+	if len(urlPieces) < 2 {
+		panic("Invalid remote URL format!")
+	}
+
+	if len(strings.Split(urlPieces[len(urlPieces)-1], "/")) < 2 {
+		panic("Must include file path in remote URL!")
+	}
+
+	return true
 }
 
 func validAddresses(location1 string, location2 string) bool {
-	return isRemote(location1) != isRemote(location2)
+	return (isRemote(location1) && validRemoteLocation(location1)) !=
+		(isRemote(location2) && validRemoteLocation(location2))
 }
 
 func isRemote(location string) bool {
 	return strings.HasPrefix(location, "ftps://")
 }
-
-func isValidURL(url string) bool {
-	if !isRemote(url) {
-		return false
-	}
-	userSeparate := strings.Split(url[7:], "@")
-	user := userSeparate[0]
-	return len(userSeparate) == 2 && strings.Contains(user, ":")
-}
-
-// len != 2 || validURL == validURL -> throw error
 
 func makeConn(connection string) (net.Conn, error) {
 	return net.Dial("tcp", connection)
