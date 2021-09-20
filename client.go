@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -18,7 +19,7 @@ func main() {
 	response := readFromServer(connection)
 	fmt.Println(response)
 	defer connection.Close()
-	startUp(connection, hostname, username, password)
+	connection = startUp(connection, hostname, username, password)
 	handleCommand(connection, command, locations, filePath)
 }
 
@@ -46,7 +47,39 @@ func ftpCommand(command string, locations []string, remoteFilePath string) strin
 	}
 }
 
-func startUp(conn net.Conn, hostname string, username string, password string) {
+func list(connection net.Conn, filePath string) string {
+	dataChannel := startDataChannel(connection)
+	defer dataChannel.Close()
+	response := readFromServer(dataChannel)
+	fmt.Println(response)
+
+	writeToServer(dataChannel, fmt.Sprintf("LIST %s\r\n", filePath))
+	response = readFromServer(dataChannel)
+	return response
+}
+
+func startDataChannel(connection net.Conn) net.Conn {
+	writeToServer(connection, "PASV\r\n")
+	response := readFromServer(connection)
+	fmt.Println(response)
+
+	verifyDataChannelResponse(response)
+
+	dataChannel, err := makeConn(hostname + ":" + port)
+	checkError(err)
+}
+
+func verifyDataChannelResponse(response string) {
+	responseCode := strings.Split(response, " ")[0]
+	if (responseCode != strconv.Itoa(227)) {
+		panic("Failed to establish data channel!")
+	}
+
+	ipAddress := strings.Split(response, " ")[4]
+
+}
+
+func startUp(conn net.Conn, hostname string, username string, password string) net.Conn {
 	writeToServer(conn, "AUTH TLS\r\n")
 	response := readFromServer(conn)
 	fmt.Println(response)
@@ -63,15 +96,16 @@ func startUp(conn net.Conn, hostname string, username string, password string) {
 	writeToServer(conn, "PROT P\r\n")
 	response = readFromServer(conn)
 	fmt.Println(response)
-	writeToServer(conn, "TYPE I\r\n")
-	response = readFromServer(conn)
-	fmt.Println(response)
-	writeToServer(conn, "MODE S\r\n")
-	response = readFromServer(conn)
-	fmt.Println(response)
-	writeToServer(conn, "STRU F\r\n")
-	response = readFromServer(conn)
-	fmt.Println(response)
+	return conn
+	// writeToServer(conn, "TYPE I\r\n")
+	// response = readFromServer(conn)
+	// fmt.Println(response)
+	// writeToServer(conn, "MODE S\r\n")
+	// response = readFromServer(conn)
+	// fmt.Println(response)
+	// writeToServer(conn, "STRU F\r\n")
+	// response = readFromServer(conn)
+	// fmt.Println(response)
 }
 
 // Read the response from the given server connection.
