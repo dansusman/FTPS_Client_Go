@@ -4,16 +4,19 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 )
 
+var hostname string
+
 func main() {
 	server, username, password, command, locations := readArgs()
-	hostname, port, filePath := strings.Split(server, ":")[0], strings.Split(strings.Split(server, ":")[1], "/")[0], server[strings.Index(server, "/"):]
-	fmt.Println(filePath, command, locations)
+	hostname = strings.Split(server, ":")[0]
+	port, filePath := strings.Split(strings.Split(server, ":")[1], "/")[0], server[strings.Index(server, "/"):]
 	connection, err := makeConn(hostname + ":" + port)
 	checkError(err)
 	response := readFromServer(connection)
@@ -24,10 +27,13 @@ func main() {
 }
 
 func handleCommand(connection net.Conn, command string, locations []string, remoteFilePath string) {
-	fmt.Println(ftpCommand(command, locations, remoteFilePath))
-	writeToServer(connection, ftpCommand(command, locations, remoteFilePath))
-	response := readFromServer(connection)
-	fmt.Println(response)
+	if command == "rmdir" || command == "mkdir" {
+		writeToServer(connection, ftpCommand(command, locations, remoteFilePath))
+		response := readFromServer(connection)
+		fmt.Println(response)
+	} else if command == "ls" {
+		list(connection, remoteFilePath)
+	}
 }
 
 func ftpCommand(command string, locations []string, remoteFilePath string) string {
@@ -48,44 +54,70 @@ func ftpCommand(command string, locations []string, remoteFilePath string) strin
 }
 
 func list(connection net.Conn, filePath string) string {
-	dataChannel := startDataChannel(connection)
-	defer dataChannel.Close()
-	response := readFromServer(dataChannel)
+	// 1. Send the PASV command
+	writeToServer(connection, "PASV\r\n")
+	response := readFromServer(connection)
+	hostIp, port := verifyDataChannelResponse(response)
 	fmt.Println(response)
-
-	writeToServer(dataChannel, fmt.Sprintf("LIST %s\r\n", filePath))
+	// 2. Write command
+	writeToServer(connection, fmt.Sprintf("LIST %s\r\n", filePath))
+	// 3. Open new socket for data channel and connect to IP and port from step 1
+	dataChannel := startDataChannel(hostIp, port)
+	// 4. Read server's response to the command in step 2
+	response = readFromServer(connection)
+	fmt.Println(response)
+	// If the response contains an error code, close the data channel and abort.
+	responseCode := strings.Split(response, " ")[0]
+	if responseCode[0] == '4' || responseCode[0] == '5' || responseCode[0] == '6' {
+		dataChannel.Close()
+		panic("Error in control command: " + response)
+	}
+	// 5. Wrap data channel socket in TLS
+	dataChannel = tls.Client(dataChannel, &tls.Config{ServerName: hostname})
+	// 6. Receive data on data channel
 	response = readFromServer(dataChannel)
+	fmt.Println(response)
+	// 7. Close the data channel.
+	dataChannel.Close()
+	// 8. Read the final response from the server on the control channel.
+	response = readFromServer(connection)
+	fmt.Println(response)
 	return response
 }
 
-func startDataChannel(connection net.Conn) net.Conn {
-	writeToServer(connection, "PASV\r\n")
-	response := readFromServer(connection)
-	fmt.Println(response)
-
-	verifyDataChannelResponse(response)
-
-	dataChannel, err := makeConn(hostname + ":" + port)
+func startDataChannel(hostIp string, port string) net.Conn {
+	dataChannel, err := makeConn(hostIp + ":" + port)
 	checkError(err)
+	return dataChannel
 }
 
-func verifyDataChannelResponse(response string) {
-	responseCode := strings.Split(response, " ")[0]
-	if (responseCode != strconv.Itoa(227)) {
+func verifyDataChannelResponse(response string) (string, string) {
+	responseSplit := strings.Split(response, " ")
+	if responseSplit[0] != strconv.Itoa(227) || len(responseSplit) != 5 {
 		panic("Failed to establish data channel!")
 	}
-
-	ipAddress := strings.Split(response, " ")[4]
-
+	ipAddressWithPort := strings.Split(responseSplit[4][1:len(responseSplit[4])-3], ",")
+	ipAddress := ipAddressWithPort[:4]
+	portStart, convertErr := strconv.Atoi(ipAddressWithPort[4])
+	checkError(convertErr)
+	portEnd, convertErr := strconv.Atoi(ipAddressWithPort[5])
+	checkError(convertErr)
+	port := (portStart << 8) + portEnd
+	return strings.Join(ipAddress, "."), strconv.Itoa(port)
 }
 
-func startUp(conn net.Conn, hostname string, username string, password string) net.Conn {
+func authTLS(conn net.Conn) net.Conn {
 	writeToServer(conn, "AUTH TLS\r\n")
 	response := readFromServer(conn)
 	fmt.Println(response)
 	conn = tls.Client(conn, &tls.Config{ServerName: hostname})
+	return conn
+}
+
+func startUp(conn net.Conn, hostname string, username string, password string) net.Conn {
+	conn = authTLS(conn)
 	writeToServer(conn, fmt.Sprintf("USER %s\r\n", username))
-	response = readFromServer(conn)
+	response := readFromServer(conn)
 	fmt.Println(response)
 	writeToServer(conn, fmt.Sprintf("PASS %s\r\n", password))
 	response = readFromServer(conn)
@@ -110,19 +142,12 @@ func startUp(conn net.Conn, hostname string, username string, password string) n
 
 // Read the response from the given server connection.
 func readFromServer(connection net.Conn) string {
-
-	// initialize a new Reader so ReadString() method can be used
 	reader := bufio.NewReader(connection)
-
-	// read response until a newline char is found (end of message
-	// according to our protocol)
 	line, readError := reader.ReadString('\n')
-
-	// ensure no errors occurred during reading
+	if (readError == io.EOF) {
+		return ""
+	}
 	checkError(readError)
-
-	// chop off the newline at the end of line (from the docs:
-	// "returning a string containing the data up to and including the delimiter)"
 	readLine := line[:len(line)-1]
 	return readLine
 }
@@ -164,29 +189,21 @@ func validRemoteLocation(location string) bool {
 	if !strings.HasPrefix(location, "ftps://") {
 		panic("Please input a valid URL beginning with ftps://")
 	}
-
 	userSeparate := strings.Split(location[7:], "@")
-
 	if len(userSeparate) != 2 {
 		panic("Please supply URL in format ftps://<username>:<password>@<location.com>/<path-to-file>!")
 	}
-
 	user, url := userSeparate[0], userSeparate[1]
-
 	if len(strings.Split(user, ":")) != 2 {
 		panic("Please include your login username and password in your FTP URL.")
 	}
-
 	urlPieces := strings.Split(url, ".")
-
 	if len(urlPieces) < 2 {
 		panic("Invalid remote URL format!")
 	}
-
 	if len(strings.Split(urlPieces[len(urlPieces)-1], "/")) < 2 {
 		panic("Must include file path in remote URL!")
 	}
-
 	return true
 }
 
@@ -213,6 +230,6 @@ func writeToServer(connection net.Conn, data string) {
 // nothing since no error occurred.
 func checkError(err error) {
 	if err != nil {
-		panic("failed in communication with server; reason: " + err.Error())
+		panic("Error: " + err.Error())
 	}
 }
