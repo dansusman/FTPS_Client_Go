@@ -16,7 +16,13 @@ var hostname string
 func main() {
 	server, username, password, command, locations := readArgs()
 	hostname = strings.Split(server, ":")[0]
-	port, filePath := strings.Split(strings.Split(server, ":")[1], "/")[0], server[strings.Index(server, "/"):]
+	var filePath string
+	if !strings.Contains(server, "/") {
+		filePath = "/"
+	} else {
+		filePath = server[strings.Index(server, "/"):]
+	}
+	port := strings.Split(strings.Split(server, ":")[1], "/")[0]
 	connection, err := makeConn(hostname + ":" + port)
 	checkError(err)
 	response := readFromServer(connection)
@@ -27,44 +33,74 @@ func main() {
 }
 
 func handleCommand(connection net.Conn, command string, locations []string, remoteFilePath string) {
-	if command == "rmdir" || command == "mkdir" {
+	switch(command) {
+	case "rmdir", "mkdir", "rm":
 		writeToServer(connection, ftpCommand(command, locations, remoteFilePath))
 		response := readFromServer(connection)
 		fmt.Println(response)
-	} else if command == "ls" {
+	case "ls":
 		list(connection, remoteFilePath)
+	case "cp":
+		copyFile(connection, locations)
+	case "mv":
+		moveFile(connection, locations)
+	default:
+		panic("Invalid command!")
 	}
 }
 
+func copyFile(conn net.Conn, locations []string) {
+	if isRemote(locations[0]) {
+		retrieveFile(conn, locations[0], locations[1])
+		writeToServer(conn, ftpCommand("rm", locations, locations[0]))
+		response := readFromServer(conn)
+		fmt.Println(response)
+	} else {
+		storeFile(conn, locations[0], locations[1])
+		os.Remove(locations[0])
+	}
+}
+
+func moveFile(conn net.Conn, locations []string) {
+	if isRemote(locations[0]) {
+		retrieveFile(conn, locations[0], locations[1])
+		
+	} else {
+		storeFile(conn, locations[0], locations[1])
+	}
+	
+}
+
+
 func ftpCommand(command string, locations []string, remoteFilePath string) string {
 	switch command {
-	case "ls":
-		return fmt.Sprintf("LIST %s\r\n", remoteFilePath)
 	case "rm":
 		return fmt.Sprintf("DELE %s\r\n", remoteFilePath)
 	case "rmdir":
 		return fmt.Sprintf("RMD %s\r\n", remoteFilePath)
 	case "mkdir":
 		return fmt.Sprintf("MKD %s\r\n", remoteFilePath)
-	// case "cp": return fmt.Sprintf("")
-	// case "mv":
 	default:
 		panic("Invalid command!")
 	}
 }
 
-func list(connection net.Conn, filePath string) string {
-	// 1. Send the PASV command
+func initializeDataChannel(connection net.Conn, command string) net.Conn {
 	writeToServer(connection, "PASV\r\n")
 	response := readFromServer(connection)
 	hostIp, port := verifyDataChannelResponse(response)
 	fmt.Println(response)
+	writeToServer(connection, command)
+	return startDataChannel(hostIp, port)
+}
+
+func list(connection net.Conn, filePath string) string {
+	// 1. Send the PASV command
 	// 2. Write command
-	writeToServer(connection, fmt.Sprintf("LIST %s\r\n", filePath))
 	// 3. Open new socket for data channel and connect to IP and port from step 1
-	dataChannel := startDataChannel(hostIp, port)
+	dataChannel := initializeDataChannel(connection, fmt.Sprintf("LIST %s\r\n", filePath))
 	// 4. Read server's response to the command in step 2
-	response = readFromServer(connection)
+	response := readFromServer(connection)
 	fmt.Println(response)
 	// If the response contains an error code, close the data channel and abort.
 	responseCode := strings.Split(response, " ")[0]
@@ -75,14 +111,78 @@ func list(connection net.Conn, filePath string) string {
 	// 5. Wrap data channel socket in TLS
 	dataChannel = tls.Client(dataChannel, &tls.Config{ServerName: hostname})
 	// 6. Receive data on data channel
-	response = readFromServer(dataChannel)
-	fmt.Println(response)
+	reader := bufio.NewReader(dataChannel)
+	for {
+		line, readErr := reader.ReadString('\n')
+		if (readErr == io.EOF) {
+			break;
+		}
+		readLine := line[:len(line)-1]
+		fmt.Println(readLine)
+	}
 	// 7. Close the data channel.
 	dataChannel.Close()
 	// 8. Read the final response from the server on the control channel.
 	response = readFromServer(connection)
 	fmt.Println(response)
 	return response
+}
+
+func retrieveFile(conn net.Conn, remoteFilePath string, localFilePath string) string {
+	initUploadDownload(conn)
+	dataChannel := initializeDataChannel(conn, fmt.Sprintf("RETR %s\r\n", remoteFilePath))
+	response := readFromServer(conn)
+	fmt.Println(response)
+	responseCode := strings.Split(response, " ")[0]
+	if responseCode[0] == '4' || responseCode[0] == '5' || responseCode[0] == '6' {
+		dataChannel.Close()
+		panic("Error in control command: " + response)
+	}
+	defer dataChannel.Close()
+	dataChannel = tls.Client(dataChannel, &tls.Config{ServerName: hostname})
+
+	file, fileErr := os.Create(localFilePath)
+	if fileErr != nil {
+		panic("File error: " + fileErr.Error())
+	}
+
+	defer file.Close()
+
+	_, copyErr := io.Copy(file, conn)
+	checkError(copyErr)
+
+	dataChannel.Close()
+	response = readFromServer(conn)
+	fmt.Println(response)
+	return response
+}
+
+func storeFile(conn net.Conn, remoteFilePath string, localFilePath string) string {
+	initUploadDownload(conn)
+	dataChannel := initializeDataChannel(conn, fmt.Sprintf("STOR %s\r\n", remoteFilePath))
+	response := readFromServer(conn)
+	fmt.Println(response)
+	responseCode := strings.Split(response, " ")[0]
+	if responseCode[0] == '4' || responseCode[0] == '5' || responseCode[0] == '6' {
+		dataChannel.Close()
+		panic("Error in control command: " + response)
+	}
+	defer dataChannel.Close()
+	dataChannel = tls.Client(dataChannel, &tls.Config{ServerName: hostname})
+	return ""
+
+}
+
+func initUploadDownload(conn net.Conn) {
+	writeToServer(conn, "TYPE I\r\n")
+	response := readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, "MODE S\r\n")
+	response = readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, "STRU F\r\n")
+	response = readFromServer(conn)
+	fmt.Println(response)
 }
 
 func startDataChannel(hostIp string, port string) net.Conn {
@@ -129,24 +229,12 @@ func startUp(conn net.Conn, hostname string, username string, password string) n
 	response = readFromServer(conn)
 	fmt.Println(response)
 	return conn
-	// writeToServer(conn, "TYPE I\r\n")
-	// response = readFromServer(conn)
-	// fmt.Println(response)
-	// writeToServer(conn, "MODE S\r\n")
-	// response = readFromServer(conn)
-	// fmt.Println(response)
-	// writeToServer(conn, "STRU F\r\n")
-	// response = readFromServer(conn)
-	// fmt.Println(response)
 }
 
 // Read the response from the given server connection.
-func readFromServer(connection net.Conn) string {
+func readFromServer(connection net.Conn) (string) {
 	reader := bufio.NewReader(connection)
 	line, readError := reader.ReadString('\n')
-	if (readError == io.EOF) {
-		return ""
-	}
 	checkError(readError)
 	readLine := line[:len(line)-1]
 	return readLine
@@ -197,12 +285,12 @@ func validRemoteLocation(location string) bool {
 	if len(strings.Split(user, ":")) != 2 {
 		panic("Please include your login username and password in your FTP URL.")
 	}
+	// if len(strings.Split(url, "/")) < 2 {
+	// 	panic("Must include file path in remote URL!")
+	// }
 	urlPieces := strings.Split(url, ".")
 	if len(urlPieces) < 2 {
 		panic("Invalid remote URL format!")
-	}
-	if len(strings.Split(urlPieces[len(urlPieces)-1], "/")) < 2 {
-		panic("Must include file path in remote URL!")
 	}
 	return true
 }
