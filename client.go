@@ -33,7 +33,7 @@ func main() {
 }
 
 func handleCommand(connection net.Conn, command string, locations []string, remoteFilePath string) {
-	switch(command) {
+	switch command {
 	case "rmdir", "mkdir", "rm":
 		writeToServer(connection, ftpCommand(command, locations, remoteFilePath))
 		response := readFromServer(connection)
@@ -51,26 +51,32 @@ func handleCommand(connection net.Conn, command string, locations []string, remo
 
 func copyFile(conn net.Conn, locations []string) {
 	if isRemote(locations[0]) {
-		retrieveFile(conn, locations[0], locations[1])
-		writeToServer(conn, ftpCommand("rm", locations, locations[0]))
-		response := readFromServer(conn)
-		fmt.Println(response)
+		url, _, _ := parseRemote(locations[0])
+		filePath := url[strings.Index(url, "/"):]
+		retrieveFile(conn, filePath, locations[1])
 	} else {
-		storeFile(conn, locations[0], locations[1])
-		os.Remove(locations[0])
+		url, _, _ := parseRemote(locations[1])
+		filePath := url[strings.Index(url, "/"):]
+		storeFile(conn, filePath, locations[0])
 	}
 }
 
 func moveFile(conn net.Conn, locations []string) {
 	if isRemote(locations[0]) {
-		retrieveFile(conn, locations[0], locations[1])
-		
+		url, _, _ := parseRemote(locations[0])
+		filePath := url[strings.Index(url, "/"):]
+		fmt.Println(filePath)
+		retrieveFile(conn, filePath, locations[1])
+		handleCommand(conn, "rm", locations, filePath)
 	} else {
-		storeFile(conn, locations[0], locations[1])
+		url, _, _ := parseRemote(locations[1])
+		filePath := url[strings.Index(url, "/"):]
+		fmt.Println(filePath)
+		storeFile(conn, filePath, locations[0])
+		os.Remove(locations[0])
 	}
-	
-}
 
+}
 
 func ftpCommand(command string, locations []string, remoteFilePath string) string {
 	switch command {
@@ -114,8 +120,8 @@ func list(connection net.Conn, filePath string) string {
 	reader := bufio.NewReader(dataChannel)
 	for {
 		line, readErr := reader.ReadString('\n')
-		if (readErr == io.EOF) {
-			break;
+		if readErr == io.EOF {
+			break
 		}
 		readLine := line[:len(line)-1]
 		fmt.Println(readLine)
@@ -136,19 +142,18 @@ func retrieveFile(conn net.Conn, remoteFilePath string, localFilePath string) st
 	responseCode := strings.Split(response, " ")[0]
 	if responseCode[0] == '4' || responseCode[0] == '5' || responseCode[0] == '6' {
 		dataChannel.Close()
-		panic("Error in control command: " + response)
+		panic("Error in control command, retrieving: " + response)
 	}
 	defer dataChannel.Close()
 	dataChannel = tls.Client(dataChannel, &tls.Config{ServerName: hostname})
 
 	file, fileErr := os.Create(localFilePath)
+	defer file.Close()
 	if fileErr != nil {
 		panic("File error: " + fileErr.Error())
 	}
 
-	defer file.Close()
-
-	_, copyErr := io.Copy(file, conn)
+	_, copyErr := io.Copy(file, dataChannel)
 	checkError(copyErr)
 
 	dataChannel.Close()
@@ -165,12 +170,24 @@ func storeFile(conn net.Conn, remoteFilePath string, localFilePath string) strin
 	responseCode := strings.Split(response, " ")[0]
 	if responseCode[0] == '4' || responseCode[0] == '5' || responseCode[0] == '6' {
 		dataChannel.Close()
-		panic("Error in control command: " + response)
+		panic("Error in control command, storing: " + response)
 	}
-	defer dataChannel.Close()
 	dataChannel = tls.Client(dataChannel, &tls.Config{ServerName: hostname})
-	return ""
+	defer dataChannel.Close()
 
+	file, openErr := os.Open(localFilePath)
+	defer file.Close()
+	if openErr != nil {
+		panic("File error: " + openErr.Error())
+	}
+
+	_, copyErr := io.Copy(dataChannel, file)
+	checkError(copyErr)
+
+	dataChannel.Close()
+	response = readFromServer(conn)
+	fmt.Println(response)
+	return response
 }
 
 func initUploadDownload(conn net.Conn) {
@@ -232,7 +249,7 @@ func startUp(conn net.Conn, hostname string, username string, password string) n
 }
 
 // Read the response from the given server connection.
-func readFromServer(connection net.Conn) (string) {
+func readFromServer(connection net.Conn) string {
 	reader := bufio.NewReader(connection)
 	line, readError := reader.ReadString('\n')
 	checkError(readError)
@@ -310,6 +327,7 @@ func makeConn(connection string) (net.Conn, error) {
 
 // Write the given data message to the given server connection.
 func writeToServer(connection net.Conn, data string) {
+	fmt.Println(data)
 	_, writeError := connection.Write([]byte(data))
 	checkError(writeError)
 }
