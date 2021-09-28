@@ -64,6 +64,100 @@ func handleCommand(connection net.Conn, command string, locations []string, remo
 	}
 }
 
+// Converts the given arg "command" into a valid FTP formatted command.
+// E.g. "rm file.txt" becomes "DELE file.txt\r\n"
+func ftpCommand(command string, locations []string, remoteFilePath string) string {
+	switch command {
+	case "rm":
+		return fmt.Sprintf("DELE %s\r\n", remoteFilePath)
+	case "rmdir":
+		return fmt.Sprintf("RMD %s\r\n", remoteFilePath)
+	case "mkdir":
+		return fmt.Sprintf("MKD %s\r\n", remoteFilePath)
+	default:
+		panic("Invalid command!")
+	}
+}
+
+////////////////////////////////////////////
+///           Initialization            ///
+//////////////////////////////////////////
+
+// Initializes the data channel socket. Returns the data channel connection object.
+func initializeDataChannel(connection net.Conn, command string) net.Conn {
+	// Ask the FTPS server to open a data channel.
+	writeToServer(connection, "PASV\r\n")
+	response := readFromServer(connection)
+	// validate response from PASV and parse for IP address and port
+	hostIp, port := verifyDataChannelResponse(response)
+	fmt.Println(response)
+	writeToServer(connection, command)
+	return startDataChannel(hostIp, port)
+}
+
+// Verifies that the data channel response from PASV is of valid form
+// and parses for the IP Address and Port of the data channel.
+// Returns the IP address and port number of the data channel.
+func verifyDataChannelResponse(response string) (string, string) {
+	responseSplit := strings.Split(response, " ")
+	if responseSplit[0] != strconv.Itoa(227) || len(responseSplit) != 5 {
+		panic("Failed to establish data channel!")
+	}
+	ipAddressWithPort := strings.Split(responseSplit[4][1:len(responseSplit[4])-3], ",")
+	ipAddress := ipAddressWithPort[:4]
+	portStart, convertErr := strconv.Atoi(ipAddressWithPort[4])
+	checkError(convertErr)
+	portEnd, convertErr := strconv.Atoi(ipAddressWithPort[5])
+	checkError(convertErr)
+	port := (portStart << 8) + portEnd
+	return strings.Join(ipAddress, "."), strconv.Itoa(port)
+}
+
+// Creates a connection to the data channel, as specified by
+// the hostIp IP Address and the port number.
+func startDataChannel(hostIp string, port string) net.Conn {
+	dataChannel, err := makeConn(hostIp + ":" + port)
+	checkError(err)
+	return dataChannel
+}
+
+// Preps the control socket for upload/download of data.
+func initUploadDownload(conn net.Conn) {
+	writeToServer(conn, "TYPE I\r\n")
+	response := readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, "MODE S\r\n")
+	response = readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, "STRU F\r\n")
+	response = readFromServer(conn)
+	fmt.Println(response)
+}
+
+// Preps the control socket with username, password, TLS encryption, private
+// protection level, and a protection buffer of zero bytes. These
+// steps must be run prior to any FTPS commands.
+func startUp(conn net.Conn, hostname string, username string, password string) net.Conn {
+	conn = authTLS(conn)
+	writeToServer(conn, fmt.Sprintf("USER %s\r\n", username))
+	response := readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, fmt.Sprintf("PASS %s\r\n", password))
+	response = readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, "PBSZ 0\r\n")
+	response = readFromServer(conn)
+	fmt.Println(response)
+	writeToServer(conn, "PROT P\r\n")
+	response = readFromServer(conn)
+	fmt.Println(response)
+	return conn
+}
+
+////////////////////////////////////////////
+///            FTP Functions            ///
+//////////////////////////////////////////
+
 // Performs the "cp" command through FTPS. This copys a file from
 // source location to destination location (the two strings in arg "locations").
 func copyFile(conn net.Conn, locations []string) {
@@ -107,33 +201,6 @@ func moveFile(conn net.Conn, locations []string) {
 		storeFile(conn, filePath, locations[0])
 		os.Remove(locations[0])
 	}
-}
-
-// Converts the given arg "command" into a valid FTP formatted command.
-// E.g. "rm file.txt" becomes "DELE file.txt\r\n"
-func ftpCommand(command string, locations []string, remoteFilePath string) string {
-	switch command {
-	case "rm":
-		return fmt.Sprintf("DELE %s\r\n", remoteFilePath)
-	case "rmdir":
-		return fmt.Sprintf("RMD %s\r\n", remoteFilePath)
-	case "mkdir":
-		return fmt.Sprintf("MKD %s\r\n", remoteFilePath)
-	default:
-		panic("Invalid command!")
-	}
-}
-
-// Initializes the data channel socket. Returns the data channel connection object.
-func initializeDataChannel(connection net.Conn, command string) net.Conn {
-	// Ask the FTPS server to open a data channel.
-	writeToServer(connection, "PASV\r\n")
-	response := readFromServer(connection)
-	// validate response from PASV and parse for IP address and port
-	hostIp, port := verifyDataChannelResponse(response)
-	fmt.Println(response)
-	writeToServer(connection, command)
-	return startDataChannel(hostIp, port)
 }
 
 // Performs the "ls" command through FTPS. This lists the file
@@ -247,84 +314,9 @@ func storeFile(conn net.Conn, remoteFilePath string, localFilePath string) strin
 	return response
 }
 
-// Preps the control socket for upload/download of data.
-func initUploadDownload(conn net.Conn) {
-	writeToServer(conn, "TYPE I\r\n")
-	response := readFromServer(conn)
-	fmt.Println(response)
-	writeToServer(conn, "MODE S\r\n")
-	response = readFromServer(conn)
-	fmt.Println(response)
-	writeToServer(conn, "STRU F\r\n")
-	response = readFromServer(conn)
-	fmt.Println(response)
-}
-
-// Creates a connection to the data channel, as specified by
-// the hostIp IP Address and the port number.
-func startDataChannel(hostIp string, port string) net.Conn {
-	dataChannel, err := makeConn(hostIp + ":" + port)
-	checkError(err)
-	return dataChannel
-}
-
-// Verifies that the data channel response from PASV is of valid form
-// and parses for the IP Address and Port of the data channel.
-// Returns the IP address and port number of the data channel.
-func verifyDataChannelResponse(response string) (string, string) {
-	responseSplit := strings.Split(response, " ")
-	if responseSplit[0] != strconv.Itoa(227) || len(responseSplit) != 5 {
-		panic("Failed to establish data channel!")
-	}
-	ipAddressWithPort := strings.Split(responseSplit[4][1:len(responseSplit[4])-3], ",")
-	ipAddress := ipAddressWithPort[:4]
-	portStart, convertErr := strconv.Atoi(ipAddressWithPort[4])
-	checkError(convertErr)
-	portEnd, convertErr := strconv.Atoi(ipAddressWithPort[5])
-	checkError(convertErr)
-	port := (portStart << 8) + portEnd
-	return strings.Join(ipAddress, "."), strconv.Itoa(port)
-}
-
-// Informs the control socket that TLS is required,
-// and wraps the given connection object in TLS.
-// Returns the given socket wrapped in TLS.
-func authTLS(conn net.Conn) net.Conn {
-	writeToServer(conn, "AUTH TLS\r\n")
-	response := readFromServer(conn)
-	fmt.Println(response)
-	conn = tls.Client(conn, &tls.Config{ServerName: hostname})
-	return conn
-}
-
-// Preps the control socket with username, password, TLS encryption, private
-// protection level, and a protection buffer of zero bytes. These
-// steps must be run prior to any FTPS commands.
-func startUp(conn net.Conn, hostname string, username string, password string) net.Conn {
-	conn = authTLS(conn)
-	writeToServer(conn, fmt.Sprintf("USER %s\r\n", username))
-	response := readFromServer(conn)
-	fmt.Println(response)
-	writeToServer(conn, fmt.Sprintf("PASS %s\r\n", password))
-	response = readFromServer(conn)
-	fmt.Println(response)
-	writeToServer(conn, "PBSZ 0\r\n")
-	response = readFromServer(conn)
-	fmt.Println(response)
-	writeToServer(conn, "PROT P\r\n")
-	response = readFromServer(conn)
-	fmt.Println(response)
-	return conn
-}
-
-// Read the response from the given server connection.
-func readFromServer(connection net.Conn) string {
-	reader := bufio.NewReader(connection)
-	line, readError := reader.ReadString('\n')
-	checkError(readError)
-	readLine := line[:len(line)-1]
-	return readLine
-}
+////////////////////////////////////////////
+///               PARSING               ///
+//////////////////////////////////////////
 
 // Reads the command line arguments, verifies their validity/format matches
 // what is expected, and parses for the server name, username, password,
@@ -408,9 +400,33 @@ func isRemote(location string) bool {
 	return strings.HasPrefix(location, "ftps://")
 }
 
+////////////////////////////////////////////
+///           GENERAL PURPOSE           ///
+//////////////////////////////////////////
+
 // Creates a connection to the given server name.
 func makeConn(connection string) (net.Conn, error) {
 	return net.Dial("tcp", connection)
+}
+
+// Informs the control socket that TLS is required,
+// and wraps the given connection object in TLS.
+// Returns the given socket wrapped in TLS.
+func authTLS(conn net.Conn) net.Conn {
+	writeToServer(conn, "AUTH TLS\r\n")
+	response := readFromServer(conn)
+	fmt.Println(response)
+	conn = tls.Client(conn, &tls.Config{ServerName: hostname})
+	return conn
+}
+
+// Read the response from the given server connection.
+func readFromServer(connection net.Conn) string {
+	reader := bufio.NewReader(connection)
+	line, readError := reader.ReadString('\n')
+	checkError(readError)
+	readLine := line[:len(line)-1]
+	return readLine
 }
 
 // Write the given data message to the given server connection.
