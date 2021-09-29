@@ -40,6 +40,9 @@ func main() {
 	connection = startUp(connection, hostname, username, password)
 	// perform the command as inputted through command line
 	handleCommand(connection, command, locations, filePath)
+	writeToServer(connection, "QUIT\r\n")
+	response = readFromServer(connection)
+	fmt.Println(response)
 }
 
 // Performs the command as specified by the arg "command". Currently,
