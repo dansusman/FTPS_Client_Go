@@ -220,6 +220,9 @@ func list(connection net.Conn, filePath string) string {
 	responseCode := strings.Split(response, " ")[0]
 	if responseCode[0] == '4' || responseCode[0] == '5' || responseCode[0] == '6' {
 		dataChannel.Close()
+		writeToServer(connection, "QUIT\r\n")
+		response = readFromServer(connection)
+		fmt.Println(response)
 		panic("Error in control command: " + response)
 	}
 	// 5. Wrap data channel socket in TLS
@@ -257,6 +260,9 @@ func retrieveFile(conn net.Conn, remoteFilePath string, localFilePath string) st
 	responseCode := strings.Split(response, " ")[0]
 	if responseCode[0] == '4' || responseCode[0] == '5' || responseCode[0] == '6' {
 		dataChannel.Close()
+		writeToServer(conn, "QUIT\r\n")
+		response = readFromServer(conn)
+		fmt.Println(response)
 		panic("Error in control command, retrieving: " + response)
 	}
 
@@ -266,10 +272,11 @@ func retrieveFile(conn net.Conn, remoteFilePath string, localFilePath string) st
 
 	// create a file on client's machine at localFilePath
 	file, fileErr := os.Create(localFilePath)
-	defer file.Close()
 	if fileErr != nil {
 		panic("File error: " + fileErr.Error())
 	}
+	defer file.Close()
+
 	// copy the information from the server to the newly created file
 	_, copyErr := io.Copy(file, dataChannel)
 	checkError(copyErr)
@@ -293,6 +300,9 @@ func storeFile(conn net.Conn, remoteFilePath string, localFilePath string) strin
 	responseCode := strings.Split(response, " ")[0]
 	if responseCode[0] == '4' || responseCode[0] == '5' || responseCode[0] == '6' {
 		dataChannel.Close()
+		writeToServer(conn, "QUIT\r\n")
+		response = readFromServer(conn)
+		fmt.Println(response)
 		panic("Error in control command, storing: " + response)
 	}
 	// wrap data channel socket in TLS
@@ -301,10 +311,10 @@ func storeFile(conn net.Conn, remoteFilePath string, localFilePath string) strin
 
 	// open the local file we are going to store
 	file, openErr := os.Open(localFilePath)
-	defer file.Close()
 	if openErr != nil {
 		panic("File error: " + openErr.Error())
 	}
+	defer file.Close()
 
 	// copy the data from the open local file to the data channel
 	_, copyErr := io.Copy(dataChannel, file)
