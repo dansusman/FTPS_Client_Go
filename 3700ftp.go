@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"crypto/tls/conn"
 )
 
 // hostname of FTP server
@@ -29,7 +30,13 @@ func main() {
 	} else {
 		filePath = server[strings.Index(server, "/"):]
 	}
-	port := strings.Split(strings.Split(server, ":")[1], "/")[0]
+	var port string
+	// if no port specified, default to 21
+	if (len(strings.Split(server, ":")) == 1) {
+		port = "21"
+	} else {
+		port = strings.Split(strings.Split(server, ":")[1], "/")[0]
+	}
 	// create connection with server
 	connection, err := makeConn(hostname + ":" + port)
 	checkError(err)
@@ -169,6 +176,9 @@ func copyFile(conn net.Conn, locations []string) {
 		// we know we want to RETR from server, so
 		// parse remote for the file path and call RETR
 		url, _, _ := parseRemote(locations[0])
+		if (!strings.Contains(url, "/")) {
+			panic("No file path given!")
+		}
 		filePath := url[strings.Index(url, "/"):]
 		retrieveFile(conn, filePath, locations[1])
 	} else {
@@ -178,6 +188,9 @@ func copyFile(conn net.Conn, locations []string) {
 		// we also know that we want to STOR to server
 		// so parse remote file path and call STOR
 		url, _, _ := parseRemote(locations[1])
+		if (!strings.Contains(url, "/")) {
+			panic("No file path given!")
+		}
 		filePath := url[strings.Index(url, "/"):]
 		storeFile(conn, filePath, locations[0])
 	}
@@ -190,8 +203,10 @@ func moveFile(conn net.Conn, locations []string) {
 		// if the first location is remote,
 		// call RETR, then DELE
 		url, _, _ := parseRemote(locations[0])
+		if (!strings.Contains(url, "/")) {
+			panic("No file path given!")
+		}
 		filePath := url[strings.Index(url, "/"):]
-		fmt.Println(filePath)
 		retrieveFile(conn, filePath, locations[1])
 		handleCommand(conn, "rm", locations, filePath)
 	} else {
@@ -199,8 +214,10 @@ func moveFile(conn net.Conn, locations []string) {
 		// so call STOR and then delete the local file
 		// (source file must be local, as guaranteed by verifyCommand)
 		url, _, _ := parseRemote(locations[1])
+		if (!strings.Contains(url, "/")) {
+			panic("No file path given!")
+		}
 		filePath := url[strings.Index(url, "/"):]
-		fmt.Println(filePath)
 		storeFile(conn, filePath, locations[0])
 		os.Remove(locations[0])
 	}
@@ -240,6 +257,7 @@ func list(connection net.Conn, filePath string) string {
 		fmt.Println(readLine)
 	}
 	// 7. Close the data channel.
+	
 	dataChannel.Close()
 	// 8. Read the final response from the server on the control channel.
 	response = readFromServer(connection)
@@ -319,7 +337,7 @@ func storeFile(conn net.Conn, remoteFilePath string, localFilePath string) strin
 	// copy the data from the open local file to the data channel
 	_, copyErr := io.Copy(dataChannel, file)
 	checkError(copyErr)
-
+	
 	// close the data channel
 	dataChannel.Close()
 	response = readFromServer(conn)
