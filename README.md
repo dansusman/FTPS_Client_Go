@@ -1,4 +1,6 @@
-# cs3700-proj2
+# Golang FTPS Client
+
+This repo holds the source code for a simple FTPS Client written in Go. This was project 2 for my Networks and Distributed Systems course at NEU.
 
 ## High Level Approach
 
